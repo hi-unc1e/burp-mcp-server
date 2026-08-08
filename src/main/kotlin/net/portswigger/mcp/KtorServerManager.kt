@@ -34,7 +34,7 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
                 server = null
 
                 val mcpServer = Server(
-                    serverInfo = Implementation("burp-suite", "1.1.2"), options = ServerOptions(
+                    serverInfo = Implementation("burp-suite", ExtensionVersion.version), options = ServerOptions(
                         capabilities = ServerCapabilities(
                             tools = ServerCapabilities.Tools(listChanged = false)
                         )
@@ -101,7 +101,7 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
                     start(wait = false)
                 }
 
-                api.logging().logToOutput("Started MCP server on ${config.host}:${config.port}")
+                api.logging().logToOutput("${ExtensionVersion.banner} — started MCP server on ${config.host}:${config.port}")
                 callback(ServerState.Running)
 
             } catch (e: Exception) {

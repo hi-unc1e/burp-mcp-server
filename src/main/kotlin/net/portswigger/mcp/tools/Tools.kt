@@ -493,10 +493,31 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         }
 
         val crawl = api.scanner().startCrawl(CrawlConfiguration.crawlConfiguration(*seedUrls.toTypedArray()))
+        val seedSnapshot = seedUrls.toList()
         val entry = ScanTaskRegistry.register(
             kind = "crawl",
             label = seedUrls.joinToString(","),
             task = crawl,
+            // The public Crawl object's counters are stubbed on some Burp builds, so
+            // observe real progress from the Site Map — the same surface Burp's AT
+            // points its own agent at ("call list_sitemap"). Count request/response
+            // pairs whose URL starts with any seed origin.
+            progressProvider = {
+                try {
+                    val origins = seedSnapshot.map { it.substringBefore('/', it).trimEnd('/') }
+                        .filter { it.isNotBlank() }.toSet()
+                    val count = api.siteMap().requestResponses().count { rr ->
+                        val u = rr.url().toString()
+                        origins.any { o -> u.startsWith(o) }
+                    }
+                    ScanTaskRegistry.Progress(
+                        observedRequestCount = count,
+                        detail = "$count sitemap entries observed under seed origin(s)"
+                    )
+                } catch (e: Throwable) {
+                    null
+                }
+            },
         )
         api.logging().logToOutput("MCP start crawl taskId=${entry.id} seeds=$seedUrls")
         "Started crawl\n" + ScanTaskRegistry.snapshot(entry)
@@ -551,8 +572,19 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
     mcpTool<DeleteScanTask>("Deletes a scan task previously started via MCP (also removes it from Burp's task list).") {
         val entry = ScanTaskRegistry.remove(taskId)
             ?: return@mcpTool "Unknown taskId: $taskId"
-        entry.task.delete()
-        "Deleted scan task $taskId (${entry.kind})"
+        val deleteError = try {
+            entry.task.delete()
+            null
+        } catch (e: Throwable) {
+            // Some ScanTask implementations may not implement delete() at runtime;
+            // the task is already removed from the registry, so report and continue.
+            "${e.javaClass.simpleName}: ${e.message}"
+        }
+        if (deleteError != null) {
+            "Removed scan task $taskId (${entry.kind}) from registry; Burp delete failed: $deleteError"
+        } else {
+            "Deleted scan task $taskId (${entry.kind})"
+        }
     }
 
     // ── P1: Inspect / bulk send ─────────────────────────────────────────
