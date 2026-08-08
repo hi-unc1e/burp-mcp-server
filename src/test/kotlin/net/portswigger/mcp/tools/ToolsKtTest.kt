@@ -1032,6 +1032,62 @@ class ToolsKtTest {
         assertEquals("test_case_conversion", "TestCaseConversion".toLowerSnakeCase())
         assertEquals("multiple_upper_case_letters", "MultipleUpperCaseLetters".toLowerSnakeCase())
     }
+
+    @Test
+    fun `p0 p1 p2 tools should register`() {
+        runBlocking {
+            val tools = client.listTools().map { it.name }.toSet()
+            // P0
+            assertTrue(tools.contains("include_in_scope"))
+            assertTrue(tools.contains("exclude_from_scope"))
+            assertTrue(tools.contains("is_in_scope"))
+            assertTrue(tools.contains("list_sitemap"))
+            assertTrue(tools.contains("get_scanner_issues_for_url"))
+            assertTrue(tools.contains("start_crawl"))
+            assertTrue(tools.contains("start_audit"))
+            assertTrue(tools.contains("list_scan_tasks"))
+            assertTrue(tools.contains("get_scan_task_status"))
+            assertTrue(tools.contains("delete_scan_task"))
+            // P1
+            assertTrue(tools.contains("inspect_proxy_http_history_item"))
+            assertTrue(tools.contains("bulk_send_http1_requests"))
+            assertTrue(tools.contains("compare_proxy_history_items"))
+            // P2
+            assertTrue(tools.contains("add_to_sitemap"))
+            assertTrue(tools.contains("import_b_check") || tools.contains("import_bcheck"))
+        }
+    }
+
+    @Test
+    fun `include in scope should call montoya scope api`() {
+        val scope = mockk<burp.api.montoya.scope.Scope>()
+        every { api.scope() } returns scope
+        every { scope.includeInScope(any()) } just Runs
+
+        runBlocking {
+            val result = client.callTool("include_in_scope", mapOf("url" to "https://example.com/"))
+            delay(100)
+            result.expectTextContent("Included in scope: https://example.com/")
+        }
+
+        verify(exactly = 1) { scope.includeInScope("https://example.com/") }
+    }
+
+    @Test
+    fun `scan task registry should track and snapshot`() {
+        val task = mockk<burp.api.montoya.scanner.ScanTask>()
+        every { task.statusMessage() } returns "running"
+        every { task.requestCount() } returns 3
+        every { task.errorCount() } returns 0
+
+        val entry = ScanTaskRegistry.register("crawl", "https://a", task)
+        assertNotNull(ScanTaskRegistry.get(entry.id))
+        val snap = ScanTaskRegistry.snapshot(entry)
+        assertTrue(snap.contains("kind: crawl"))
+        assertTrue(snap.contains("requestCount: 3"))
+        ScanTaskRegistry.remove(entry.id)
+        assertNull(ScanTaskRegistry.get(entry.id))
+    }
     
     @Test
     fun `edition specific tools should only register in professional edition`() {

@@ -9,6 +9,10 @@ import burp.api.montoya.http.HttpMode
 import burp.api.montoya.http.HttpService
 import burp.api.montoya.http.message.HttpHeader
 import burp.api.montoya.http.message.requests.HttpRequest
+import burp.api.montoya.scanner.AuditConfiguration
+import burp.api.montoya.scanner.BuiltInAuditConfiguration
+import burp.api.montoya.scanner.CrawlConfiguration
+import burp.api.montoya.sitemap.SiteMapFilter
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
@@ -408,6 +412,282 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
 
         "Editor text has been set"
     }
+
+    // ── P0: Scope / Sitemap / Scanner lifecycle ──────────────────────────
+
+    mcpTool<IncludeInScope>("Adds a URL prefix to Burp suite-wide target scope.") {
+        api.scope().includeInScope(url)
+        api.logging().logToOutput("MCP include in scope: $url")
+        "Included in scope: $url"
+    }
+
+    mcpTool<ExcludeFromScope>("Removes a URL prefix from Burp suite-wide target scope.") {
+        api.scope().excludeFromScope(url)
+        api.logging().logToOutput("MCP exclude from scope: $url")
+        "Excluded from scope: $url"
+    }
+
+    mcpTool<IsInScope>("Checks whether a URL is inside the current suite-wide target scope.") {
+        val inScope = api.scope().isInScope(url)
+        "url: $url\ninScope: $inScope"
+    }
+
+    mcpPaginatedTool<ListSitemap>(
+        "Lists Site Map HTTP request/response pairs. Optional urlPrefix filters by path prefix (SiteMapFilter.prefixFilter)."
+    ) {
+        val allowed = runBlocking {
+            checkDataAccessOrDeny(DataAccessType.HTTP_HISTORY, config, api, "sitemap")
+        }
+        if (!allowed) {
+            return@mcpPaginatedTool sequenceOf("Sitemap access denied by Burp Suite")
+        }
+
+        val items = if (urlPrefix.isNullOrBlank()) {
+            api.siteMap().requestResponses()
+        } else {
+            api.siteMap().requestResponses(SiteMapFilter.prefixFilter(urlPrefix))
+        }
+
+        items.asSequence().map { rr ->
+            truncateIfNeeded(
+                buildString {
+                    appendLine("url: ${rr.url()}")
+                    appendLine("status: ${if (rr.hasResponse()) rr.statusCode() else "n/a"}")
+                    appendLine("method: ${rr.request().method()}")
+                    appendLine("request:")
+                    append(rr.request().toString().take(2000))
+                    if (rr.hasResponse()) {
+                        appendLine()
+                        appendLine("response:")
+                        append(rr.response().toString().take(2000))
+                    }
+                }
+            )
+        }
+    }
+
+    mcpPaginatedTool<GetScannerIssuesForUrl>(
+        "Lists scanner issues whose base URL matches the given URL prefix filter."
+    ) {
+        if (api.burpSuite().version().edition() != BurpSuiteEdition.PROFESSIONAL) {
+            return@mcpPaginatedTool sequenceOf("Scanner issues require Burp Suite Professional")
+        }
+
+        val issues = if (urlPrefix.isNullOrBlank()) {
+            api.siteMap().issues()
+        } else {
+            api.siteMap().issues(SiteMapFilter.prefixFilter(urlPrefix))
+        }
+
+        issues.asSequence().map { Json.encodeToString(it.toSerializableForm()) }
+    }
+
+    mcpTool<StartCrawl>(
+        "Starts a Burp crawler against one or more seed URLs (Professional). Returns a taskId for list/status/delete."
+    ) {
+        if (api.burpSuite().version().edition() != BurpSuiteEdition.PROFESSIONAL) {
+            return@mcpTool "Crawl requires Burp Suite Professional"
+        }
+        if (seedUrls.isEmpty()) {
+            return@mcpTool "Error: seedUrls must not be empty"
+        }
+
+        val crawl = api.scanner().startCrawl(CrawlConfiguration.crawlConfiguration(*seedUrls.toTypedArray()))
+        val entry = ScanTaskRegistry.register(
+            kind = "crawl",
+            label = seedUrls.joinToString(","),
+            task = crawl,
+        )
+        api.logging().logToOutput("MCP start crawl taskId=${entry.id} seeds=$seedUrls")
+        "Started crawl\n" + ScanTaskRegistry.snapshot(entry)
+    }
+
+    mcpTool<StartAudit>(
+        "Starts a Burp audit (Professional). mode: LEGACY_PASSIVE_AUDIT_CHECKS or LEGACY_ACTIVE_AUDIT_CHECKS. " +
+            "Optional rawHttpRequest + target* fields enqueue a single request for audit."
+    ) {
+        if (api.burpSuite().version().edition() != BurpSuiteEdition.PROFESSIONAL) {
+            return@mcpTool "Audit requires Burp Suite Professional"
+        }
+
+        val builtIn = when (mode.uppercase()) {
+            "LEGACY_ACTIVE_AUDIT_CHECKS", "ACTIVE" -> BuiltInAuditConfiguration.LEGACY_ACTIVE_AUDIT_CHECKS
+            else -> BuiltInAuditConfiguration.LEGACY_PASSIVE_AUDIT_CHECKS
+        }
+
+        val audit = api.scanner().startAudit(AuditConfiguration.auditConfiguration(builtIn))
+
+        if (!rawHttpRequest.isNullOrBlank() && !targetHostname.isNullOrBlank() && targetPort != null && usesHttps != null) {
+            val fixed = normalizeHttpContent(rawHttpRequest)
+            val service = HttpService.httpService(targetHostname, targetPort, usesHttps)
+            val request = HttpRequest.httpRequest(service, fixed)
+            audit.addRequest(request)
+        }
+
+        val entry = ScanTaskRegistry.register(
+            kind = "audit",
+            label = mode,
+            task = audit,
+        )
+        api.logging().logToOutput("MCP start audit taskId=${entry.id} mode=$mode")
+        "Started audit\n" + ScanTaskRegistry.snapshot(entry)
+    }
+
+    mcpTool("list_scan_tasks", "Lists scanner tasks started via MCP (crawl/audit) with status and counts.") {
+        val entries = ScanTaskRegistry.list()
+        if (entries.isEmpty()) {
+            "No MCP-started scan tasks"
+        } else {
+            entries.joinToString("\n\n") { ScanTaskRegistry.snapshot(it) }
+        }
+    }
+
+    mcpTool<GetScanTaskStatus>("Returns status for a scan task previously started via MCP.") {
+        val entry = ScanTaskRegistry.get(taskId)
+            ?: return@mcpTool "Unknown taskId: $taskId"
+        ScanTaskRegistry.snapshot(entry)
+    }
+
+    mcpTool<DeleteScanTask>("Deletes a scan task previously started via MCP (also removes it from Burp's task list).") {
+        val entry = ScanTaskRegistry.remove(taskId)
+            ?: return@mcpTool "Unknown taskId: $taskId"
+        entry.task.delete()
+        "Deleted scan task $taskId (${entry.kind})"
+    }
+
+    // ── P1: Inspect / bulk send ─────────────────────────────────────────
+
+    mcpTool<InspectProxyHttpHistoryItem>(
+        "Returns one Proxy HTTP history item by zero-based index (after optional regex filter on request/response text)."
+    ) {
+        val allowed = runBlocking {
+            checkDataAccessOrDeny(DataAccessType.HTTP_HISTORY, config, api, "HTTP history")
+        }
+        if (!allowed) {
+            return@mcpTool "HTTP history access denied by Burp Suite"
+        }
+
+        val history = if (regex.isNullOrBlank()) {
+            api.proxy().history()
+        } else {
+            val compiled = Pattern.compile(regex)
+            api.proxy().history { it.contains(compiled) }
+        }
+
+        if (index < 0 || index >= history.size) {
+            return@mcpTool "Index $index out of range (size=${history.size})"
+        }
+
+        val item = history[index]
+        truncateIfNeeded(Json.encodeToString(item.toSerializableForm()))
+    }
+
+    mcpTool<BulkSendHttp1Requests>(
+        "Sends multiple HTTP/1.1 requests sequentially and returns a short status per item. " +
+            "Each item needs content + targetHostname/targetPort/usesHttps. Honors HTTP request approval settings."
+    ) {
+        if (requests.isEmpty()) {
+            return@mcpTool "Error: requests must not be empty"
+        }
+
+        val lines = mutableListOf<String>()
+        requests.forEachIndexed { i, req ->
+            val allowed = runBlocking {
+                HttpRequestSecurity.checkHttpRequestPermission(
+                    req.targetHostname, req.targetPort, config, req.content, api
+                )
+            }
+            if (!allowed) {
+                lines += "[$i] DENIED ${req.targetHostname}:${req.targetPort}"
+                return@forEachIndexed
+            }
+            val fixed = normalizeHttpContent(req.content)
+            val request = HttpRequest.httpRequest(req.toMontoyaService(), fixed)
+            val rr = api.http().sendRequest(request)
+            val status = if (rr != null && rr.hasResponse()) rr.statusCode().toString() else "n/a"
+            // Prefer toByteArray() (same as compare tool) — body() can fail resolution under compileOnly Montoya interop.
+            val len = rr?.response()?.toByteArray()?.length() ?: 0
+            lines += "[$i] HTTP $status bodyLen=$len host=${req.targetHostname}:${req.targetPort}"
+        }
+        lines.joinToString("\n")
+    }
+
+    mcpTool<CompareProxyHistoryItems>(
+        "Compares two Proxy history items by index (method/url/status/length + simple request/response digests)."
+    ) {
+        val allowed = runBlocking {
+            checkDataAccessOrDeny(DataAccessType.HTTP_HISTORY, config, api, "HTTP history")
+        }
+        if (!allowed) {
+            return@mcpTool "HTTP history access denied by Burp Suite"
+        }
+
+        val history = api.proxy().history()
+        if (indexA !in history.indices || indexB !in history.indices) {
+            return@mcpTool "Index out of range (size=${history.size})"
+        }
+        val a = history[indexA]
+        val b = history[indexB]
+        fun summarize(label: String, item: burp.api.montoya.proxy.ProxyHttpRequestResponse): String {
+            val req = item.finalRequest()
+            val resp = item.response()
+            return buildString {
+                appendLine("$label:")
+                appendLine("  ${req.method()} ${req.url()}")
+                appendLine("  status=${resp?.statusCode() ?: "n/a"} reqLen=${req.toByteArray().length()} respLen=${resp?.toByteArray()?.length() ?: 0}")
+            }
+        }
+        summarize("A[$indexA]", a) + summarize("B[$indexB]", b) +
+            "sameMethod=${a.finalRequest().method() == b.finalRequest().method()}\n" +
+            "sameUrl=${a.finalRequest().url() == b.finalRequest().url()}"
+    }
+
+    // ── P2: Sitemap inject + BCheck import ──────────────────────────────
+
+    mcpTool<AddToSitemap>(
+        "Adds a request (and optional response) to the Site Map. Useful after OpenAPI/manual discovery when no dedicated OpenAPI Montoya API is available."
+    ) {
+        val fixed = normalizeHttpContent(content)
+        val service = HttpService.httpService(targetHostname, targetPort, usesHttps)
+        val request = HttpRequest.httpRequest(service, fixed)
+        val rr = if (responseContent.isNullOrBlank()) {
+            burp.api.montoya.http.message.HttpRequestResponse.httpRequestResponse(
+                request,
+                burp.api.montoya.http.message.responses.HttpResponse.httpResponse()
+            )
+        } else {
+            burp.api.montoya.http.message.HttpRequestResponse.httpRequestResponse(
+                request,
+                burp.api.montoya.http.message.responses.HttpResponse.httpResponse(responseContent)
+            )
+        }
+        api.siteMap().add(rr)
+        "Added to sitemap: ${request.method()} ${request.url()}"
+    }
+
+    mcpTool<ImportBCheck>(
+        "Imports a BCheck script into Burp Scanner (Professional). Pass the full BCheck source. " +
+            "This is the supported Montoya path for custom scan checks; arbitrary ActiveScanCheck classes are not loadable via one-shot MCP."
+    ) {
+        if (api.burpSuite().version().edition() != BurpSuiteEdition.PROFESSIONAL) {
+            return@mcpTool "BCheck import requires Burp Suite Professional"
+        }
+        val result = if (overwriteExisting) {
+            api.scanner().bChecks().importBCheck(script, true)
+        } else {
+            api.scanner().bChecks().importBCheck(script)
+        }
+        buildString {
+            appendLine("status: ${result.status()}")
+            val errors = result.importErrors()
+            if (errors.isNotEmpty()) {
+                appendLine("errors:")
+                errors.forEach { appendLine("  - $it") }
+            } else {
+                appendLine("errors: (none)")
+            }
+        }.trimEnd()
+    }
 }
 
 fun getActiveEditor(api: MontoyaApi): JTextArea? {
@@ -540,4 +820,89 @@ data class GenerateCollaboratorPayload(
 @Serializable
 data class GetCollaboratorInteractions(
     val payloadId: String? = null
+)
+
+// ── P0 / P1 / P2 parameter types ────────────────────────────────────────
+
+@Serializable
+data class IncludeInScope(val url: String)
+
+@Serializable
+data class ExcludeFromScope(val url: String)
+
+@Serializable
+data class IsInScope(val url: String)
+
+@Serializable
+data class ListSitemap(
+    val urlPrefix: String? = null,
+    override val count: Int,
+    override val offset: Int,
+) : Paginated
+
+@Serializable
+data class GetScannerIssuesForUrl(
+    val urlPrefix: String? = null,
+    override val count: Int,
+    override val offset: Int,
+) : Paginated
+
+@Serializable
+data class StartCrawl(
+    val seedUrls: List<String>,
+)
+
+@Serializable
+data class StartAudit(
+    val mode: String = "LEGACY_PASSIVE_AUDIT_CHECKS",
+    val rawHttpRequest: String? = null,
+    val targetHostname: String? = null,
+    val targetPort: Int? = null,
+    val usesHttps: Boolean? = null,
+)
+
+@Serializable
+data class GetScanTaskStatus(val taskId: String)
+
+@Serializable
+data class DeleteScanTask(val taskId: String)
+
+@Serializable
+data class InspectProxyHttpHistoryItem(
+    val index: Int,
+    val regex: String? = null,
+)
+
+@Serializable
+data class BulkSendHttp1Item(
+    val content: String,
+    override val targetHostname: String,
+    override val targetPort: Int,
+    override val usesHttps: Boolean,
+) : HttpServiceParams
+
+@Serializable
+data class BulkSendHttp1Requests(
+    val requests: List<BulkSendHttp1Item>,
+)
+
+@Serializable
+data class CompareProxyHistoryItems(
+    val indexA: Int,
+    val indexB: Int,
+)
+
+@Serializable
+data class AddToSitemap(
+    val content: String,
+    val responseContent: String? = null,
+    override val targetHostname: String,
+    override val targetPort: Int,
+    override val usesHttps: Boolean,
+) : HttpServiceParams
+
+@Serializable
+data class ImportBCheck(
+    val script: String,
+    val overwriteExisting: Boolean = false,
 )
