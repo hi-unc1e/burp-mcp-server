@@ -3,21 +3,29 @@ name: CI
 on:
   push:
     branches: [main]
+    tags:
+      # Official-style version tags + our VAT / AT fork tags
+      - "v*"
+      - "vAT*"
+      - "VAT*"
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
     name: Test & Build
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    permissions:
+      contents: write # needed to attach JAR to a tag release
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -32,10 +40,11 @@ jobs:
           validate-wrappers: true
 
       - name: Run tests
-        run: ./gradlew test
+        run: ./gradlew test --no-daemon
 
       - name: Build extension JAR
-        run: ./gradlew embedProxyJar
+        # Same entrypoint as BappManifest BuildCommand / official docs
+        run: ./gradlew embedProxyJar --no-daemon
 
       - name: Upload test reports
         if: failure()
@@ -45,12 +54,33 @@ jobs:
           path: build/reports/tests/
           retention-days: 7
 
-      - name: Upload extension JAR
+      - name: Upload extension JAR (artifact)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: burp-mcp-extension
           path: build/libs/burp-mcp-*.jar
           retention-days: 30
+          if-no-files-found: error
+
+      - name: Publish GitHub Release on tag
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@6da8fa9354ddfdc4aeace5fc48d7f679b5214090 # v2.4.1
+        with:
+          files: build/libs/burp-mcp-*.jar
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            ## Build
+
+            CI-built fat JAR (`burp-mcp-all.jar`) from tag `${{ github.ref_name }}`.
+
+            - Java 21 (Temurin)
+            - Tasks: `./gradlew test embedProxyJar`
+            - Includes embedded `mcp-proxy-all.jar` (stdio proxy)
+
+            Load in Burp: **Extensions → Add → Java →** the attached JAR.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   dependency-submission:
     name: Dependency Submission

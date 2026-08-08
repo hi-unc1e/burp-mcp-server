@@ -1,4 +1,26 @@
-# Burp Suite MCP Server Extension
+# Burp Suite MCP Server Extension (VAT / AT fork)
+
+> **Fork of [PortSwigger/mcp-server](https://github.com/PortSwigger/mcp-server)**  
+> Repo: [hi-unc1e/burp-mcp-server](https://github.com/hi-unc1e/burp-mcp-server)  
+> Current package version: **`1.3.0-AT`** · release tags: **`vAT_x.y.z`** (e.g. `vAT_1.3.0`)
+
+This fork keeps the official MCP workbench path and adds **P0–P2 tools** aimed at AT-adjacent external-agent workflows (scope, sitemap, crawl/audit task tracking, history inspect/bulk/compare, add_to_sitemap, BCheck import).
+
+### Releases & CI
+
+- Push / PR to `main` → test + `embedProxyJar` (same as upstream style); JAR uploaded as a workflow artifact.
+- **Push a version tag** (`v*`, `vAT*`) → same build, then attach `burp-mcp-all.jar` to a **GitHub Release**.
+- Manual: **Actions → CI → Run workflow**.
+
+```bash
+# Example release flow
+git tag -a vAT_1.3.1 -m "VAT 1.3.1"
+git push origin vAT_1.3.1
+```
+
+Prebuilt JARs: [Releases](https://github.com/hi-unc1e/burp-mcp-server/releases).
+
+---
 
 ## Overview
 
@@ -11,6 +33,7 @@ For more information about the protocol visit: [modelcontextprotocol.io](https:/
 - Connect Burp Suite to AI clients through MCP
 - Automatic installation for Claude Desktop
 - Comes with packaged Stdio MCP proxy server
+- **AT fork:** extra scope / site map / scan-task / history tools (see `Tools.kt`)
 
 ## Usage
 
@@ -25,27 +48,23 @@ For more information about the protocol visit: [modelcontextprotocol.io](https:/
 
 Ensure that the following prerequisites are met before building and installing the extension:
 
-1. **Java**: Java must be installed and available in your system's PATH. You can verify this by running `java --version` in your terminal.
-2. **jar Command**: The `jar` command must be executable and available in your system's PATH. You can verify this by running `jar --version` in your terminal. This is required for building and installing the extension.
+1. **Java 21+**: required by the project toolchain (`java.toolchain.version=21`). Prefer Temurin 21. On macOS you can `export JAVA_HOME=…` (e.g. alias `jdk21`).
+2. **jar Command**: The `jar` command must be on `PATH` (`jar --version`). Needed by `embedProxyJar`.
 
 ### Building the Extension
 
-1. **Clone the Repository**: Obtain the source code for the MCP Server Extension.
+1. **Clone the Repository** (this fork or upstream):
    ```
-   git clone https://github.com/PortSwigger/mcp-server.git
-   ```
-
-2. **Navigate to the Project Directory**: Move into the project's root directory.
-   ```
-   cd mcp-server
+   git clone https://github.com/hi-unc1e/burp-mcp-server.git
+   cd burp-mcp-server
    ```
 
-3. **Build the JAR File**: Use Gradle to build the extension.
+2. **Build the JAR File** (JDK 21):
    ```
    ./gradlew embedProxyJar
    ```
 
-   This command compiles the source code and packages it into a JAR file located in `build/libs/burp-mcp-all.jar`.
+   Output: `build/libs/burp-mcp-all.jar` (fat JAR with embedded `mcp-proxy-all.jar`).
 
 ### Loading the Extension into Burp Suite
 
