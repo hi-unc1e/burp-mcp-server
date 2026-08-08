@@ -8,14 +8,23 @@ This fork keeps the official MCP workbench path and adds **P0–P2 tools** aimed
 
 ### Releases & CI
 
-- Push / PR to `main` → test + `embedProxyJar` (same as upstream style); JAR uploaded as a workflow artifact.
-- **Push a version tag** (`v*`, `vAT*`) → same build, then attach `burp-mcp-all.jar` to a **GitHub Release**.
-- Manual: **Actions → CI → Run workflow**.
+Workflow: [`.github/workflows/ci.yml`](.github/workflows/ci.yml) (JDK 21, `./gradlew test embedProxyJar`).
+
+| Trigger | What happens |
+|--------|----------------|
+| Push / PR to `main` | Test + build; upload `burp-mcp-extension` artifact |
+| Tag (`v*` / `vAT*`) via push **or** tag `create` | Same build + attach JAR to GitHub Release |
+| **Actions → CI → Run workflow** | Manual build (pick branch or tag ref) |
+| Publish a GitHub Release | Rebuild and attach JAR to that release |
+
+This repo is a **GitHub fork** of PortSwigger/mcp-server. If push events never show up under Actions, open the **Actions** tab once and confirm workflows are enabled; you can always release with:
 
 ```bash
-# Example release flow
+# Preferred release flow for this fork
 git tag -a vAT_1.3.1 -m "VAT 1.3.1"
-git push origin vAT_1.3.1
+git push hi-unc1e vAT_1.3.1
+# If no run appears, force the tag pipeline:
+gh workflow run CI --ref vAT_1.3.1
 ```
 
 Prebuilt JARs: [Releases](https://github.com/hi-unc1e/burp-mcp-server/releases).
