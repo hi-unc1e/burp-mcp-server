@@ -100,7 +100,9 @@ jobs:
   dependency-submission:
     name: Dependency Submission
     runs-on: ubuntu-latest
+    # Upstream job; many forks have Dependency graph disabled → don't fail the whole CI
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    continue-on-error: true
     permissions:
       contents: write
 
